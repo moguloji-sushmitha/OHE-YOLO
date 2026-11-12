@@ -1,91 +1,50 @@
 import math
 import warnings
 from pathlib import Path
+
 import cv2
 import numpy as np
+from ultralytics.data.utils import check_det_dataset
 
-from yolo_model.class_colors import class_color
+from yolo_model.class_colors import DEFECT_CLASSES, class_color
 
-CLASS_NAMES = (
-    "mast_bracket",
-    "swivel_clip_rust",
-    "catenary_dropper_clip",
-    "suspension_insulator_bend",
-    "contact_wire_dropper_clamp_rust",
-    "mast_bracket_fitting",
-    "bird_nest",
-    "contact_wire",
-    "catenary_ending_clamp",
-    "anchor_clamp",
-    "tesnion_struct",
-    "guide_pulley_support_bracket",
-    "bracket_tube",
-    "mast_anchor_fitting",
-    "catenary_suspension_clamp",
-    "stay_tube_rust",
-    "intermediate_pulley",
-    "stay_tube",
-    "swivel",
-    "contact_wire_parallel_clamp",
-    "parallel_clamp",
-    "thread",
-    "seddle_clamp",
-    "stay_rod",
-    "registration_tube",
-    "movable_pulley_block",
-    "counterweight_balance_mark_missing",
-    "tension_clamp",
-    "insulator",
-    "suspension_insulator",
-    "mast_guy_rod_fit",
-    "tie_rod_rust",
-    "tie_rod",
-    "hook_bracket",
-    "turnbuckle",
-    "drop_bracket",
-    "registration_tube_dropper_clamp",
-    "stay_adjustor",
-    "counterweight",
-    "tube_cap",
-    "tension_rod",
-    "catenory_wire",
-    "catenory_suspension_bracket_rust",
-    "catenory_wire_rust",
-    "insulator_broken",
-    "fixed_pulley_block",
-    "catenary_suspension_bracket",
-    "clevis",
-    "wire_rope",
-    "swivel_clip",
-    "mast",
-    "anti_wind_clamp",
-    "anti_bird_disk",
-    "counterweight_misalignement",
-    "dropper",
-    "registration_tube_hook",
-    "clamp",
-    "BFB_steady_arm",
-    "TT_sleeve",
-    "compensating_plate",
-    "registration_tube_dropper_break",
-    "insulator_muddy",
-    "dropper_clamp",
-    "catenory_suspension_clamp_rust",
-    "contact_wire_dropper_clip",
-    "registration_tube_dropper",
-    "earth_wire",
-    "Jumper",
-    "bracket_tube_rust",
-    "cantiliver_assembly",
-    "diagonal_stay_wire",
-    "vacume_circuit_breaker",
-    "incoming_OHE_line",
-)
+
 def main() -> None:
     project_root = Path(__file__).resolve().parents[2]
-    image_path = project_root / "dataset" / "images" / "train" / "frame_000763.jpg"
-    label_path = project_root / "dataset" / "labels" / "train" / "frame_000763.txt"
-    output_path = project_root / "predictions" / "ground_truth_frame_000763.jpg"
+    data_path = project_root / "configs" / "data.yaml"
+    dataset = check_det_dataset(str(data_path), autodownload=False)
+    class_names = dataset["names"]
+    defect_ids = {
+        class_id
+        for class_id, class_name in class_names.items()
+        if class_name in DEFECT_CLASSES
+    }
+    if not defect_ids:
+        raise ValueError("No defect classes are configured in the dataset YAML.")
+
+    label_directory = project_root / "dataset" / "labels" / "train"
+    image_directory = project_root / "dataset" / "images" / "train"
+    image_path = None
+    label_path = None
+    for candidate_label in sorted(label_directory.glob("*.txt")):
+        lines = candidate_label.read_text(encoding="utf-8-sig").splitlines()
+        if any(
+            (fields := line.split()) and int(fields[0]) in defect_ids
+            for line in lines
+        ):
+            candidate_image = image_directory / f"{candidate_label.stem}.jpg"
+            if candidate_image.is_file():
+                image_path = candidate_image
+                label_path = candidate_label
+                break
+
+    if image_path is None or label_path is None:
+        raise FileNotFoundError(
+            "No training image with a labeled defect class was found."
+        )
+    output_path = (
+        project_root / "predictions" / f"ground_truth_{image_path.stem}.jpg"
+    )
 
     if not image_path.is_file():
         raise FileNotFoundError(f"Image file does not exist: {image_path}")
@@ -106,7 +65,7 @@ def main() -> None:
                 raise ValueError("expected a class ID and eight coordinates")
 
             class_id = int(fields[0])
-            if not 0 <= class_id < len(CLASS_NAMES):
+            if class_id not in class_names:
                 raise ValueError(f"class ID {class_id} is outside the mapping")
 
             coordinates = [float(value) for value in fields[1:]]
@@ -134,12 +93,12 @@ def main() -> None:
             image,
             [polygon],
             isClosed=True,
-            color=class_color(CLASS_NAMES[class_id]),
+            color=class_color(class_names[class_id]),
             thickness=2,
             lineType=cv2.LINE_AA,
         )
 
-        name = CLASS_NAMES[class_id]
+        name = class_names[class_id]
         text_size, baseline = cv2.getTextSize(
             name, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1
         )

@@ -9,54 +9,42 @@ from ultralytics import YOLO
 from yolo_model.class_colors import class_color
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
+VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".m4v", ".mpeg", ".mpg"}
 
 
-def find_unique_images(source):
-    images_by_name = {}
-
-    for image_path in sorted(
-        source.iterdir(),
-        key=lambda path: (path.name.casefold(), path.name),
-    ):
-        if (
-            image_path.is_file()
-            and image_path.suffix.casefold() in IMAGE_EXTENSIONS
-        ):
-            key = image_path.stem.casefold()
-            images_by_name.setdefault(key, image_path)
-
+def find_media_files(source: Path) -> list[Path]:
+    supported_extensions = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
     return sorted(
-        images_by_name.values(),
-        key=lambda image_path: (
-            image_path.name.casefold(),
-            image_path.name,
+        (
+            path
+            for path in source.iterdir()
+            if path.is_file() and path.suffix.casefold() in supported_extensions
         ),
+        key=lambda path: (path.name.casefold(), path.name),
     )
 
 
-def draw_obb(image, polygon, class_name):
+def draw_obb(image, polygon, class_name, confidence):
     color = class_color(class_name)
-
     points = polygon.astype(int).reshape((-1, 1, 2))
+    image_height, image_width = image.shape[:2]
+    scale = max(min(image_width, image_height) / 640, 1.0)
+    line_thickness = max(3, round(3 * scale))
 
-    # Draw only the OBB outline.
     cv2.polylines(
         image,
         [points],
         isClosed=True,
         color=color,
-        thickness=3,
+        thickness=line_thickness,
         lineType=cv2.LINE_AA,
     )
 
-    # Draw class name only.
-    label = class_name
-
-    image_height, image_width = image.shape[:2]
-
+    label = f"{class_name} {confidence:.2f}"
     font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = 0.60
-    thickness = 2
+    font_scale = 0.65 * scale
+    thickness = max(2, round(2 * scale))
+    padding = max(5, round(5 * scale))
 
     (text_width, text_height), baseline = cv2.getTextSize(
         label,
@@ -67,40 +55,134 @@ def draw_obb(image, polygon, class_name):
 
     corners = points[:, 0, :]
     anchor = corners[(corners[:, 0] + corners[:, 1]).argmin()]
-    text_x = min(max(int(anchor[0]), 0), max(image_width - text_width, 0))
-    text_y = int(anchor[1]) - 8
+    label_width = min(text_width + padding * 2, image_width)
+    label_height = min(text_height + baseline + padding * 2, image_height)
+    label_x = min(max(int(anchor[0]), 0), image_width - label_width)
+    label_top = int(anchor[1]) - label_height
+    if label_top < 0:
+        label_top = min(int(anchor[1]) + padding, image_height - label_height)
 
-    # If there is no room above the box, put the label below it.
-    if text_y - text_height - baseline < 0:
-        text_y = min(
-            image_height - 1,
-            int(anchor[1]) + text_height + baseline + 5,
-        )
+    cv2.rectangle(
+        image,
+        (label_x, label_top),
+        (label_x + label_width - 1, label_top + label_height - 1),
+        (20, 20, 20),
+        thickness=cv2.FILLED,
+    )
+    cv2.rectangle(
+        image,
+        (label_x, label_top),
+        (label_x + label_width - 1, label_top + label_height - 1),
+        color,
+        thickness=max(1, round(scale)),
+        lineType=cv2.LINE_AA,
+    )
 
     cv2.putText(
         image,
         label,
-        (text_x, text_y),
+        (label_x + padding, label_top + padding + text_height),
         font,
         font_scale,
-        color,
+        (255, 255, 255),
         thickness,
         cv2.LINE_AA,
     )
 
 
+def annotate_result(image, result, model_names) -> int:
+    if result.obb is None or len(result.obb) == 0:
+        return 0
+
+    polygons = result.obb.xyxyxyxy.cpu().numpy()
+    class_ids = result.obb.cls.cpu().numpy().astype(int)
+    confidences = result.obb.conf.cpu().numpy()
+    detection_count = 0
+    for polygon, class_id, confidence in zip(polygons, class_ids, confidences):
+        class_name = model_names.get(int(class_id))
+        if class_name is None:
+            print(f"WARNING: Unknown class ID {class_id}")
+            continue
+        draw_obb(image, polygon, class_name, float(confidence))
+        detection_count += 1
+    return detection_count
+
+
+def predict_frame(model, image, model_names, confidence) -> int:
+    result = model.predict(
+        source=image,
+        task="obb",
+        conf=confidence,
+        imgsz=640,
+        device="cpu",
+        verbose=False,
+    )[0]
+    return annotate_result(image, result, model_names)
+
+
+def predict_video(
+    model, video_path, output_path, model_names, confidence
+) -> tuple[int, int]:
+    capture = cv2.VideoCapture(str(video_path))
+    if not capture.isOpened():
+        capture.release()
+        raise OSError(f"Could not open video: {video_path}")
+
+    fps = capture.get(cv2.CAP_PROP_FPS)
+    if not fps or fps <= 0:
+        fps = 30.0
+    width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    if width <= 0 or height <= 0:
+        capture.release()
+        raise OSError(f"Could not read video dimensions: {video_path}")
+
+    writer = cv2.VideoWriter(
+        str(output_path),
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        fps,
+        (width, height),
+    )
+    if not writer.isOpened():
+        capture.release()
+        writer.release()
+        raise OSError(f"Could not create prediction video: {output_path}")
+
+    frames_processed = 0
+    total_detections = 0
+    try:
+        while True:
+            success, frame = capture.read()
+            if not success:
+                break
+            total_detections += predict_frame(
+                model, frame, model_names, confidence
+            )
+            writer.write(frame)
+            frames_processed += 1
+    finally:
+        capture.release()
+        writer.release()
+
+    if frames_processed == 0:
+        raise OSError(f"Video contains no readable frames: {video_path}")
+    return frames_processed, total_detections
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Run YOLO OBB predictions on an image or image folder."
+        description="Run YOLO OBB predictions on an image, video, or folder."
     )
     parser.add_argument("weights", type=Path, help="Path to trained OBB weights")
-    parser.add_argument("source", type=Path, help="Image file or folder of images")
+    parser.add_argument(
+        "source", type=Path, help="Image/video file or folder of media files"
+    )
     parser.add_argument(
         "confidence",
         nargs="?",
         type=float,
-        default=0.001,
-        help="Confidence threshold from 0 to 1 (default: 0.001)",
+        default=0.25,
+        help="Confidence threshold from 0 to 1 (default: 0.25)",
     )
     parser.add_argument(
         "--output",
@@ -139,14 +221,26 @@ def main():
     print(f"Model classes: {len(model_names)}")
 
     if source.is_file():
-        image_files = [source]
+        media_files = [source]
     else:
-        image_files = find_unique_images(source)
+        media_files = find_media_files(source)
 
-    if not image_files:
-        parser.error(f"no supported images found in: {source}")
+    supported_extensions = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
+    unsupported_files = [
+        path
+        for path in media_files
+        if path.suffix.casefold() not in supported_extensions
+    ]
+    if source.is_file() and unsupported_files:
+        parser.error(
+            f"unsupported media file: {unsupported_files[0]}; supported formats "
+            f"are images {sorted(IMAGE_EXTENSIONS)} and videos "
+            f"{sorted(VIDEO_EXTENSIONS)}"
+        )
+    if not media_files:
+        parser.error(f"no supported images or videos found in: {source}")
 
-    print(f"Unique images found: {len(image_files)}")
+    print(f"Media files found: {len(media_files)}")
     print()
 
     source_name = source.stem if source.is_file() else source.name
@@ -163,126 +257,56 @@ def main():
     )
 
     total_detections = 0
-    images_processed = 0
+    media_processed = 0
+    frames_processed = 0
 
-    for image_path in image_files:
+    for media_path in media_files:
+        print(f"Processing: {media_path.name}")
 
-        print(f"Processing: {image_path.name}")
-
-        image = cv2.imread(str(image_path))
-
-        if image is None:
-
-            print(
-                f"WARNING: Could not read "
-                f"{image_path}"
+        if media_path.suffix.casefold() in VIDEO_EXTENSIONS:
+            output_path = output_dir / f"{media_path.stem}_predicted.mp4"
+            video_frames, detections = predict_video(
+                model,
+                media_path,
+                output_path,
+                model_names,
+                confidence,
             )
-
-            continue
-
-        results = model.predict(
-            source=str(image_path),
-
-            # Explicit OBB inference.
-            task="obb",
-
-            # User can change this from PowerShell.
-            conf=confidence,
-
-            imgsz=640,
-            device="cpu",
-            verbose=False,
-        )
-
-        images_processed += 1
-
-        result = results[0]
-        detection_count = 0
-
-        if (
-            result.obb is not None
-            and len(result.obb) > 0
-        ):
-
-            # YOLO11-OBB gives four corner points.
-            polygons = (
-                result.obb.xyxyxyxy
-                .cpu()
-                .numpy()
-            )
-
-            class_ids = (
-                result.obb.cls
-                .cpu()
-                .numpy()
-                .astype(int)
-            )
-
-            for polygon, class_id in zip(
-                polygons,
-                class_ids,
-            ):
-
-                class_id = int(class_id)
-
-                if class_id not in model_names:
-
-                    print(
-                        f"WARNING: Unknown class ID "
-                        f"{class_id}"
-                    )
-
-                    continue
-
-                class_name = model_names[class_id]
-
-                draw_obb(
-                    image=image,
-                    polygon=polygon,
-                    class_name=class_name,
-                )
-
-                detection_count += 1
-
+            frames_processed += video_frames
+            total_detections += detections
+            media_processed += 1
+            print(f"Frames processed: {video_frames}")
+            print(f"Detections drawn: {detections}")
         else:
+            try:
+                image = cv2.imread(str(media_path))
+            except cv2.error as error:
+                print(f"WARNING: Could not read image {media_path}: {error}")
+                continue
+            if image is None:
+                print(f"WARNING: Could not read image {media_path}")
+                continue
 
-            print("Model detections: 0")
-
-        output_path = output_dir / image_path.name
-
-        success = cv2.imwrite(
-            str(output_path),
-            image,
-        )
-
-        if success:
-
-            print(
-                f"Detections drawn: "
-                f"{detection_count}"
+            output_path = output_dir / media_path.name
+            detection_count = predict_frame(
+                model, image, model_names, confidence
             )
+            if not cv2.imwrite(str(output_path), image):
+                raise OSError(f"Could not save prediction image: {output_path}")
+            total_detections += detection_count
+            media_processed += 1
+            frames_processed += 1
+            print(f"Detections drawn: {detection_count}")
 
-            print(
-                f"Result saved to: "
-                f"{output_path}"
-            )
-
-        else:
-
-            print(
-                f"ERROR: Could not save "
-                f"{output_path}"
-            )
-
+        print(f"Result saved to: {output_path}")
         print()
-
-        total_detections += detection_count
 
     print("=" * 60)
     print("PREDICTION COMPLETE")
     print("=" * 60)
-    print(f"Unique images found: {len(image_files)}")
-    print(f"Images processed: {images_processed}")
+    print(f"Media files found: {len(media_files)}")
+    print(f"Media files processed: {media_processed}")
+    print(f"Frames processed: {frames_processed}")
     print(f"Total detections: {total_detections}")
     print(f"Output directory: {output_dir.resolve()}")
     print("=" * 60)

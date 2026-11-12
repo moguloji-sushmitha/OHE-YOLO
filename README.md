@@ -71,6 +71,11 @@ dataset YAML. For a different dataset, update `configs/data.yaml` (or provide
 another YAML with the same format). Keep the YAML paths relative so the project
 works after it is copied to another computer.
 
+The current OHE dataset configuration contains only classes with labeled
+instances in both the train and validation splits. The labels were filtered and
+remapped to match these 17 class IDs. The previous 73-class checkpoint is not
+compatible with this updated class map; retrain before using the reduced set.
+
 ## 3. Train
 
 From the project root, run:
@@ -115,9 +120,9 @@ that differ from its training data. Test it on representative images before
 relying on results.
 
 Run the command from the project root (the folder containing `pyproject.toml`).
-Give the first argument as the weights-file path and the second as either one
-image path or a folder path. Paths can be relative to the project root or
-absolute. In PowerShell, quote paths that contain spaces:
+Give the first argument as the weights-file path and the second as an image,
+video, or folder path. Paths can be relative to the project root or absolute.
+In PowerShell, quote paths that contain spaces:
 
 ```powershell
 # One image, using paths relative to the project root
@@ -131,9 +136,15 @@ uv run python src\yolo_model\predict.py `
   "C:\Users\OtherUser\models\best.pt" `
   "C:\Users\OtherUser\Pictures\inspection images" `
   0.25
+
+# A video file
+uv run python src\yolo_model\predict.py `
+  "C:\Users\OtherUser\models\best.pt" `
+  "C:\Users\OtherUser\Videos\01071.mp4" `
+  0.25
 ```
 
-The confidence argument is optional; if omitted, the script uses `0.001`.
+The confidence argument is optional; if omitted, the script uses `0.25`.
 Higher thresholds usually show fewer, more confident detections. Inference
 results are written to a new run-specific subfolder under `predictions` in the
 current working directory. The folder name includes the input name, model name,
@@ -141,9 +152,15 @@ and run time, so separate runs do not overwrite each other's images. To choose
 an output folder explicitly, add `--output path\to\my_results`.
 
 For a folder, the script scans only that folder (not its subfolders) and
-processes `.jpg`, `.jpeg`, and `.png` files. It does not need labels or use
-previous prediction results. Class IDs and names come from the supplied
-checkpoint, so they do not have to match this project's dataset YAML.
+processes `.jpg`, `.jpeg`, `.png`, `.mp4`, `.avi`, `.mov`, `.mkv`, `.m4v`,
+`.mpeg`, and `.mpg` files. Images are saved with their original filenames.
+Videos are processed frame by frame and saved as `<video name>_predicted.mp4`.
+Detected boxes use thicker class-colored outlines and readable labels showing
+the class name and confidence. Annotation size scales with the video resolution;
+this improves visibility but does not improve the model's detection accuracy.
+It does not need labels or use previous prediction results. Class IDs and names
+come from the supplied checkpoint, so they do not have to match this project's
+dataset YAML.
 Prediction outputs are local and excluded from Git.
 
 ## 5. Set defect colors
