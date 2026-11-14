@@ -155,8 +155,9 @@ For a folder, the script scans only that folder (not its subfolders) and
 processes `.jpg`, `.jpeg`, `.png`, `.mp4`, `.avi`, `.mov`, `.mkv`, `.m4v`,
 `.mpeg`, and `.mpg` files. Images are saved with their original filenames.
 Videos are processed frame by frame and saved as `<video name>_predicted.mp4`.
-Detected boxes use thicker class-colored outlines and readable labels showing
-the class name and confidence. Annotation size scales with the video resolution;
+Detected boxes use class-colored outlines and compact, background-free labels
+showing the class name and confidence. A text outline helps keep labels readable
+without a filled label box. Annotation size scales with the video resolution;
 this improves visibility but does not improve the model's detection accuracy.
 It does not need labels or use previous prediction results. Class IDs and names
 come from the supplied checkpoint, so they do not have to match this project's

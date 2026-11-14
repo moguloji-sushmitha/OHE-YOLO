@@ -29,7 +29,7 @@ def draw_obb(image, polygon, class_name, confidence):
     points = polygon.astype(int).reshape((-1, 1, 2))
     image_height, image_width = image.shape[:2]
     scale = max(min(image_width, image_height) / 640, 1.0)
-    line_thickness = max(3, round(3 * scale))
+    line_thickness = max(2, round(2 * scale))
 
     cv2.polylines(
         image,
@@ -42,9 +42,8 @@ def draw_obb(image, polygon, class_name, confidence):
 
     label = f"{class_name} {confidence:.2f}"
     font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = 0.65 * scale
-    thickness = max(2, round(2 * scale))
-    padding = max(5, round(5 * scale))
+    font_scale = 0.45 * scale
+    thickness = max(1, round(1.5 * scale))
 
     (text_width, text_height), baseline = cv2.getTextSize(
         label,
@@ -55,33 +54,26 @@ def draw_obb(image, polygon, class_name, confidence):
 
     corners = points[:, 0, :]
     anchor = corners[(corners[:, 0] + corners[:, 1]).argmin()]
-    label_width = min(text_width + padding * 2, image_width)
-    label_height = min(text_height + baseline + padding * 2, image_height)
-    label_x = min(max(int(anchor[0]), 0), image_width - label_width)
-    label_top = int(anchor[1]) - label_height
-    if label_top < 0:
-        label_top = min(int(anchor[1]) + padding, image_height - label_height)
+    label_x = min(max(int(anchor[0]), 0), max(image_width - text_width, 0))
+    label_y = int(anchor[1]) - baseline - 2
+    if label_y - text_height < 0:
+        label_y = min(int(anchor[1]) + text_height + baseline + 2, image_height - baseline)
 
-    cv2.rectangle(
-        image,
-        (label_x, label_top),
-        (label_x + label_width - 1, label_top + label_height - 1),
-        (20, 20, 20),
-        thickness=cv2.FILLED,
-    )
-    cv2.rectangle(
-        image,
-        (label_x, label_top),
-        (label_x + label_width - 1, label_top + label_height - 1),
-        color,
-        thickness=max(1, round(scale)),
-        lineType=cv2.LINE_AA,
-    )
-
+    text_origin = (label_x, label_y)
     cv2.putText(
         image,
         label,
-        (label_x + padding, label_top + padding + text_height),
+        text_origin,
+        font,
+        font_scale,
+        (0, 0, 0),
+        thickness + 2,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        image,
+        label,
+        text_origin,
         font,
         font_scale,
         (255, 255, 255),
